@@ -31,10 +31,6 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 public class ForecastFragment extends Fragment {
 
@@ -116,8 +112,18 @@ public class ForecastFragment extends Fragment {
         }
 
         private String formatHighLows(double high, double low) {
+            SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(getActivity());
+            String units = prefs.getString(getString(R.string.pref_units_key),
+                    getString(R.string.pref_units_default));
+
+            if ("imperial".equals(units)) {
+                high = (9.0/5.0)*high + 32;
+                low = (9.0/5.0)*low + 32;
+            }
+
             long roundedHigh = Math.round(high);
             long roundedLow = Math.round(low);
+
 
             String highLowStr = roundedHigh + "/" + roundedLow;
             return highLowStr;
