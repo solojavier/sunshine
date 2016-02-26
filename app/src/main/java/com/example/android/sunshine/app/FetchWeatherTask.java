@@ -102,8 +102,7 @@ public class FetchWeatherTask extends AsyncTask<String, Void, Void> {
     }
 
     private Void getWeatherDataFromJson(String forecastJsonStr,
-                                        String locationSetting)
-            throws JSONException {
+                                        String locationSetting) {
 
         final String OWM_CITY = "city";
         final String OWM_CITY_NAME = "name";
@@ -300,9 +299,6 @@ public class FetchWeatherTask extends AsyncTask<String, Void, Void> {
             Log.e(LOG_TAG, "Error ", e);
             // If the code didn't successfully get the weather data, there's no point in attempting
             // to parse it.
-        } catch (JSONException e) {
-            Log.e(LOG_TAG, e.getMessage(), e);
-            e.printStackTrace();
         } finally {
             if (urlConnection != null) {
                 urlConnection.disconnect();
