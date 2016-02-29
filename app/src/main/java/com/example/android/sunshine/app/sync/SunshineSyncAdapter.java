@@ -8,9 +8,11 @@ import android.content.ContentResolver;
 import android.content.ContentUris;
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.SyncRequest;
 import android.content.SyncResult;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.text.format.Time;
 import android.util.Log;
@@ -34,6 +36,8 @@ import java.util.Vector;
 
 public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
     public final String LOG_TAG = SunshineSyncAdapter.class.getSimpleName();
+    public static final int SYNC_INTERVAL = 60 * 180;
+    public static final int SYNC_FLEXTIME = SYNC_INTERVAL/3;
 
     public SunshineSyncAdapter(Context context, boolean autoInitialize) {
         super(context, autoInitialize);
@@ -54,6 +58,9 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         int numDays = 14;
 
         try {
+            // Construct the URL for the OpenWeatherMap query
+            // Possible parameters are avaiable at OWM's forecast API page, at
+            // http://openweathermap.org/API#forecast
             final String FORECAST_BASE_URL =
                     "http://api.openweathermap.org/data/2.5/forecast/daily?";
             final String QUERY_PARAM = "q";
@@ -72,29 +79,38 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
 
             URL url = new URL(builtUri.toString());
 
+            // Create the request to OpenWeatherMap, and open the connection
             urlConnection = (HttpURLConnection) url.openConnection();
             urlConnection.setRequestMethod("GET");
             urlConnection.connect();
 
+            // Read the input stream into a String
             InputStream inputStream = urlConnection.getInputStream();
             StringBuffer buffer = new StringBuffer();
             if (inputStream == null) {
+                // Nothing to do.
                 return;
             }
             reader = new BufferedReader(new InputStreamReader(inputStream));
 
             String line;
             while ((line = reader.readLine()) != null) {
+                // Since it's JSON, adding a newline isn't necessary (it won't affect parsing)
+                // But it does make debugging a *lot* easier if you print out the completed
+                // buffer for debugging.
                 buffer.append(line + "\n");
             }
 
             if (buffer.length() == 0) {
+                // Stream was empty.  No point in parsing.
                 return;
             }
             forecastJsonStr = buffer.toString();
             getWeatherDataFromJson(forecastJsonStr, locationQuery);
         } catch (IOException e) {
             Log.e(LOG_TAG, "Error ", e);
+            // If the code didn't successfully get the weather data, there's no point in attempting
+            // to parse it.
         } catch (JSONException e) {
             Log.e(LOG_TAG, e.getMessage(), e);
             e.printStackTrace();
@@ -113,10 +129,16 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         return;
     }
 
+    /**
+     * Take the String representing the complete forecast in JSON Format and
+     * pull out the data we need to construct the Strings needed for the wireframes.
+     *
+     * Fortunately parsing is easy:  constructor takes the JSON string and converts it
+     * into an Object hierarchy for us.
+     */
     private void getWeatherDataFromJson(String forecastJsonStr,
                                         String locationSetting)
             throws JSONException {
-
 
         // Location information
         final String OWM_CITY = "city";
@@ -157,16 +179,28 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
 
             long locationId = addLocation(locationSetting, cityName, cityLatitude, cityLongitude);
 
+            // Insert the new weather information into the database
             Vector<ContentValues> cVVector = new Vector<ContentValues>(weatherArray.length());
+
+            // OWM returns daily forecasts based upon the local time of the city that is being
+            // asked for, which means that we need to know the GMT offset to translate this data
+            // properly.
+
+            // Since this data is also sent in-order and the first day is always the
+            // current day, we're going to take advantage of that to get a nice
+            // normalized UTC date for all of our weather.
 
             Time dayTime = new Time();
             dayTime.setToNow();
 
+            // we start at the day returned by local time. Otherwise this is a mess.
             int julianStartDay = Time.getJulianDay(System.currentTimeMillis(), dayTime.gmtoff);
 
+            // now we work exclusively in UTC
             dayTime = new Time();
 
             for(int i = 0; i < weatherArray.length(); i++) {
+                // These are the values that will be collected.
                 long dateTime;
                 double pressure;
                 int humidity;
@@ -235,9 +269,19 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
         }
     }
 
+    /**
+     * Helper method to handle insertion of a new location in the weather database.
+     *
+     * @param locationSetting The location string used to request updates from the server.
+     * @param cityName A human-readable city name, e.g "Mountain View"
+     * @param lat the latitude of the city
+     * @param lon the longitude of the city
+     * @return the row ID of the added location.
+     */
     long addLocation(String locationSetting, String cityName, double lat, double lon) {
         long locationId;
 
+        // First, check if the location with this city name exists in the db
         Cursor locationCursor = getContext().getContentResolver().query(
                 WeatherContract.LocationEntry.CONTENT_URI,
                 new String[]{WeatherContract.LocationEntry._ID},
@@ -249,25 +293,55 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
             int locationIdIndex = locationCursor.getColumnIndex(WeatherContract.LocationEntry._ID);
             locationId = locationCursor.getLong(locationIdIndex);
         } else {
+            // Now that the content provider is set up, inserting rows of data is pretty simple.
+            // First create a ContentValues object to hold the data you want to insert.
             ContentValues locationValues = new ContentValues();
 
+            // Then add the data, along with the corresponding name of the data type,
+            // so the content provider knows what kind of value is being inserted.
             locationValues.put(WeatherContract.LocationEntry.COLUMN_CITY_NAME, cityName);
             locationValues.put(WeatherContract.LocationEntry.COLUMN_LOCATION_SETTING, locationSetting);
             locationValues.put(WeatherContract.LocationEntry.COLUMN_COORD_LAT, lat);
             locationValues.put(WeatherContract.LocationEntry.COLUMN_COORD_LONG, lon);
 
+            // Finally, insert location data into the database.
             Uri insertedUri = getContext().getContentResolver().insert(
                     WeatherContract.LocationEntry.CONTENT_URI,
                     locationValues
             );
 
+            // The resulting URI contains the ID for the row.  Extract the locationId from the Uri.
             locationId = ContentUris.parseId(insertedUri);
         }
 
         locationCursor.close();
+        // Wait, that worked?  Yes!
         return locationId;
     }
-    
+
+    /**
+     * Helper method to schedule the sync adapter periodic execution
+     */
+    public static void configurePeriodicSync(Context context, int syncInterval, int flexTime) {
+        Account account = getSyncAccount(context);
+        String authority = context.getString(R.string.content_authority);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            // we can enable inexact timers in our periodic sync
+            SyncRequest request = new SyncRequest.Builder().
+                    syncPeriodic(syncInterval, flexTime).
+                    setSyncAdapter(account, authority).
+                    setExtras(new Bundle()).build();
+            ContentResolver.requestSync(request);
+        } else {
+            ContentResolver.addPeriodicSync(account,
+                    authority, new Bundle(), syncInterval);
+        }
+    }
+
+    /**
+     * Helper method to have the sync adapter sync immediately
+     * @param context The context used to access the account service
+     */
     public static void syncImmediately(Context context) {
         Bundle bundle = new Bundle();
         bundle.putBoolean(ContentResolver.SYNC_EXTRAS_EXPEDITED, true);
@@ -276,6 +350,14 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 context.getString(R.string.content_authority), bundle);
     }
 
+    /**
+     * Helper method to get the fake account to be used with SyncAdapter, or make a new one
+     * if the fake account doesn't exist yet.  If we make a new account, we call the
+     * onAccountCreated method so we can initialize things.
+     *
+     * @param context The context used to access the account service
+     * @return a fake account.
+     */
     public static Account getSyncAccount(Context context) {
         AccountManager accountManager =
                 (AccountManager) context.getSystemService(Context.ACCOUNT_SERVICE);
@@ -284,12 +366,21 @@ public class SunshineSyncAdapter extends AbstractThreadedSyncAdapter {
                 context.getString(R.string.app_name), context.getString(R.string.sync_account_type));
 
         if ( null == accountManager.getPassword(newAccount) ) {
-
             if (!accountManager.addAccountExplicitly(newAccount, "", null)) {
                 return null;
             }
-
+            onAccountCreated(newAccount, context);
         }
         return newAccount;
+    }
+
+    private static void onAccountCreated(Account newAccount, Context context) {
+        SunshineSyncAdapter.configurePeriodicSync(context, SYNC_INTERVAL, SYNC_FLEXTIME);
+        ContentResolver.setSyncAutomatically(newAccount, context.getString(R.string.content_authority), true);
+        syncImmediately(context);
+    }
+
+    public static void initializeSyncAdapter(Context context) {
+        getSyncAccount(context);
     }
 }
